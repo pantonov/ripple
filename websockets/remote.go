@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"reflect"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/golang/glog"
@@ -31,9 +32,11 @@ const (
 )
 
 type Remote struct {
-	Incoming chan interface{}
-	outgoing chan Syncer
-	ws       *websocket.Conn
+	Incoming  chan interface{}
+	outgoing  chan Syncer
+	Closing   chan bool
+	closeOnce sync.Once
+	ws        *websocket.Conn
 }
 
 // NewRemote returns a new remote session connected to the specified
@@ -48,13 +51,14 @@ func NewRemote(endpoint string) (*Remote, error) {
 	if err != nil {
 		return nil, err
 	}
-	ws, _, err := websocket.NewClient(c, u, nil, 1024, 1024)
+	ws, _, err := websocket.NewClient(c, u, nil, 65536, 65536)
 	if err != nil {
 		return nil, err
 	}
 	r := &Remote{
 		Incoming: make(chan interface{}, 1000),
 		outgoing: make(chan Syncer, 10),
+		Closing:  make(chan bool),
 		ws:       ws,
 	}
 
@@ -72,6 +76,7 @@ func (r *Remote) Close() {
 	// indicating that this Remote is fully cleaned up.
 	for _ = range r.Incoming {
 	}
+	r.closeOnce.Do(func() { close(r.Closing) })
 }
 
 // run spawns the read/write pumps and then runs until Close() is called.
@@ -93,6 +98,7 @@ func (r *Remote) run() {
 		// indicating that the readPump has returned.
 		for _ = range inbound {
 		}
+		r.closeOnce.Do(func() { close(r.Closing) })
 	}()
 
 	// Spawn read/write goroutines
